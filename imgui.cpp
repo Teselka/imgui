@@ -7253,24 +7253,143 @@ void ImGui::UpdateWindowParentAndRootLinks(ImGuiWindow* window, ImGuiWindowFlags
 void ImGui::UpdateWindowSkipRefresh(ImGuiWindow* window)
 {
     ImGuiContext& g = *GImGui;
-    window->SkipRefresh = false;
+    window->RefreshFlags &= ~ImGuiWindowRefreshFlags_SkipRefresh;
+    window->RefreshFlags &= ~ImGuiWindowRefreshFlags_RefreshedByTime;
+    window->RefreshFlags &= ~ImGuiWindowRefreshFlags_RefreshByNextFrameTime;
     if ((g.NextWindowData.Flags & ImGuiNextWindowDataFlags_HasRefreshPolicy) == 0)
         return;
     if (g.NextWindowData.RefreshFlagsVal & ImGuiWindowRefreshFlags_TryToAvoidRefresh)
     {
-        // FIXME-IDLE: Tests for e.g. mouse clicks or keyboard while focused.
+        if (window->ForceRefreshFrames > 0)
+        {
+            --window->ForceRefreshFrames;
+            return;
+        }
+
+        ImVector<double>& refresh_times = window->ForceRefreshTimes;
+
+        for (int i = 0; i < refresh_times.Size; i++)
+        {
+            double time = refresh_times[i];
+            if (g.Time >= time)
+            {
+                if (refresh_times.Size > 1)
+                {
+                    // Avoid reallocation while maintaining order
+                    for (int j = i; j < refresh_times.Size - 1; j++)
+                        refresh_times.Data[j] = refresh_times.Data[j + 1];
+
+                    --refresh_times.Size;
+                }
+                else
+                    refresh_times.Size = 0;
+
+                window->RefreshFlags |= ImGuiWindowRefreshFlags_RefreshedByTime;
+
+                if (time < 0.0)
+                    window->RefreshFlags |= ImGuiWindowRefreshFlags_RefreshByNextFrameTime;
+            }
+        }
+
+        if (window->RefreshFlags & ImGuiWindowRefreshFlags_RefreshedByTime)
+            return;
+
         if (window->Appearing) // If currently appearing
             return;
+
         if (window->Hidden) // If was hidden (previous frame)
             return;
-        if ((g.NextWindowData.RefreshFlagsVal & ImGuiWindowRefreshFlags_RefreshOnHover) && g.HoveredWindow)
-            if (window->RootWindow == g.HoveredWindow->RootWindow || IsWindowWithinBeginStackOf(g.HoveredWindow->RootWindow, window))
+
+        if (g.WheelingWindow == window)
+            return;
+
+        if (g.LastNavWindow == window && g.NavWindow != window) // Lost focus this frame
+            return;
+
+        // Docking: window hovered over another window
+        if ((g.IO.ConfigFlags & ImGuiConfigFlags_DockingEnable) && g.MovingWindow != window)
+        {
+            ImVec2 mouse_pos = ImGui::GetMousePos();
+
+            for (int i = 0; i < g.Windows.Size; i++)
+            {
+                ImGuiWindow* check_window = g.Windows[i];
+
+                if (check_window->OuterRectClipped.Contains(mouse_pos))
+                    return;
+            }
+        }
+
+        if (g.HoveredWindow && (window->RootWindow == g.HoveredWindow->RootWindow || IsWindowWithinBeginStackOf(g.HoveredWindow->RootWindow, window)))
+        {
+            if (g.NextWindowData.RefreshFlagsVal & ImGuiWindowRefreshFlags_RefreshOnHover)
                 return;
-        if ((g.NextWindowData.RefreshFlagsVal & ImGuiWindowRefreshFlags_RefreshOnFocus) && g.NavWindow)
-            if (window->RootWindow == g.NavWindow->RootWindow || IsWindowWithinBeginStackOf(g.NavWindow->RootWindow, window))
+
+            if (g.NextWindowData.RefreshFlagsVal & ImGuiWindowRefreshFlags_RefreshOnHoverAndMouseMove)
+                if (g.IO.MouseDelta.x != 0.f || g.IO.MouseDelta.y != 0.f)
+                {
+                    ++window->ForceRefreshFrames;
+                    return;
+                }
+
+            if (g.NextWindowData.RefreshFlagsVal & ImGuiWindowRefreshFlags_RefreshOnHoverAndMouseClicks)
+                for (int i = 0; i < ImGuiMouseButton_COUNT; i++)
+                {
+                    if (g.IO.MouseClicked[i] || g.IO.MouseReleased[i])
+                    {
+                        ++window->ForceRefreshFrames;
+                        return;
+                    }
+                }
+
+            if (g.NextWindowData.RefreshFlagsVal & ImGuiWindowRefreshFlags_RefreshOnHoverAndMouseDown)
+                for (int i = 0; i < ImGuiMouseButton_COUNT; i++)
+                {
+                    if (g.IO.MouseDown[i])
+                        return;
+                }
+
+            if (g.WheelingWindow == window)
                 return;
+
+            if (g.NextWindowData.RefreshFlagsVal & ImGuiWindowRefreshFlags_RefreshOnHoverAndMouseWheel)
+                if (g.IO.MouseWheel != 0.f || g.IO.MouseWheelH != 0.f)
+                    return;
+        }
+
+        if (g.NextWindowData.RefreshFlagsVal & ImGuiWindowRefreshFlags_RefreshOnActiveId)
+        {
+            if (g.ActiveIdWindow == window)
+                return;
+        }
+
+        if (g.NextWindowData.RefreshFlagsVal & ImGuiWindowRefreshFlags_RefreshOnActivePopup)
+        {
+            for (int i = 0; i < g.OpenPopupStack.Size; i++)
+            {
+                ImGuiPopupData& data = g.OpenPopupStack[i];
+                if (data.RestoreNavWindow == window || IsWindowWithinBeginStackOf(data.RestoreNavWindow->RootWindow, window))
+                    return;
+            }
+        }
+
+		if (g.NavWindow && (window->RootWindow == g.NavWindow->RootWindow || IsWindowWithinBeginStackOf(g.NavWindow->RootWindow, window)))
+		{
+			if (g.NextWindowData.RefreshFlagsVal & ImGuiWindowRefreshFlags_RefreshOnFocus)
+				return;
+
+			if (g.NextWindowData.RefreshFlagsVal & ImGuiWindowRefreshFlags_RefreshOnFocusAndKeyboardAction)
+			{
+				if (g.ProcessedAnyKbdInputEventCurrFrame)
+				{
+                    ++window->ForceRefreshFrames;
+					return;
+				}
+			}
+		}
+
         window->DrawList = NULL;
-        window->SkipRefresh = true;
+        window->RefreshFlags |= ImGuiWindowRefreshFlags_SkipRefresh;
     }
 }
 
@@ -7280,7 +7399,8 @@ static void SetWindowActiveForSkipRefresh(ImGuiWindow* window)
     for (ImGuiWindow* child : window->DC.ChildWindows)
         if (!child->Hidden)
         {
-            child->Active = child->SkipRefresh = true;
+            child->Active = true;
+            window->RefreshFlags |= ImGuiWindowRefreshFlags_SkipRefresh;
             SetWindowActiveForSkipRefresh(child);
         }
 }
@@ -7542,7 +7662,7 @@ bool ImGui::Begin(const char* name, bool* p_open, ImGuiWindowFlags flags)
     g.CurrentWindow = NULL;
 
     // When reusing window again multiple times a frame, just append content (don't need to setup again)
-    if (first_begin_of_the_frame && !window->SkipRefresh)
+    if (first_begin_of_the_frame && !(window->RefreshFlags & ImGuiWindowRefreshFlags_SkipRefresh))
     {
         // Initialize
         const bool window_is_child_tooltip = (flags & ImGuiWindowFlags_ChildWindow) && (flags & ImGuiWindowFlags_Tooltip); // FIXME-WIP: Undocumented behavior of Child+Tooltip for pinned tooltip (#1345)
@@ -8146,7 +8266,7 @@ bool ImGui::Begin(const char* name, bool* p_open, ImGuiWindowFlags flags)
     else
     {
         // Skip refresh always mark active
-        if (window->SkipRefresh)
+        if (window->RefreshFlags & ImGuiWindowRefreshFlags_SkipRefresh)
             SetWindowActiveForSkipRefresh(window);
 
         // Append
@@ -8156,7 +8276,7 @@ bool ImGui::Begin(const char* name, bool* p_open, ImGuiWindowFlags flags)
         SetLastItemDataForWindow(window, window->TitleBarRect());
     }
 
-    if (!(flags & ImGuiWindowFlags_DockNodeHost) && !window->SkipRefresh)
+    if (!(flags & ImGuiWindowFlags_DockNodeHost) && !(window->RefreshFlags & ImGuiWindowRefreshFlags_SkipRefresh))
         PushClipRect(window->InnerClipRect.Min, window->InnerClipRect.Max, true);
 
     // Clear 'accessed' flag last thing (After PushClipRect which will set the flag. We want the flag to stay false when the default "Debug" window is unused)
@@ -8164,7 +8284,7 @@ bool ImGui::Begin(const char* name, bool* p_open, ImGuiWindowFlags flags)
     window->BeginCount++;
 
     // Update visibility
-    if (first_begin_of_the_frame && !window->SkipRefresh)
+    if (first_begin_of_the_frame && !(window->RefreshFlags & ImGuiWindowRefreshFlags_SkipRefresh))
     {
         // When we are about to select this tab (which will only be visible on the _next frame_), flag it with a non-zero HiddenFramesCannotSkipItems.
         // This will have the important effect of actually returning true in Begin() and not setting SkipItems, allowing an earlier submission of the window contents.
@@ -8282,13 +8402,13 @@ void ImGui::End()
     // Close anything that is open
     if (window->DC.CurrentColumns)
         EndColumns();
-    if (!(window->Flags & ImGuiWindowFlags_DockNodeHost) && !window->SkipRefresh)   // Pop inner window clip rectangle
+    if (!(window->Flags & ImGuiWindowFlags_DockNodeHost) && !(window->RefreshFlags & ImGuiWindowRefreshFlags_SkipRefresh))   // Pop inner window clip rectangle
         PopClipRect();
     PopFocusScope();
     if (window_stack_data.DisabledOverrideReenable && window->RootWindow == window)
         EndDisabledOverrideReenable();
 
-    if (window->SkipRefresh)
+    if (window->RefreshFlags & ImGuiWindowRefreshFlags_SkipRefresh)
     {
         IM_ASSERT(window->DrawList == NULL);
         window->DrawList = &window->DrawListInst;
@@ -9089,6 +9209,29 @@ void ImGui::SetNextWindowRefreshPolicy(ImGuiWindowRefreshFlags flags)
     ImGuiContext& g = *GImGui;
     g.NextWindowData.Flags |= ImGuiNextWindowDataFlags_HasRefreshPolicy;
     g.NextWindowData.RefreshFlagsVal = flags;
+}
+
+void ImGui::AddWindowForceRefreshTime(double time)
+{
+    ImGuiContext& g = *GImGui;
+
+    if (time < 0.0 || time < g.Time)
+    {
+        IM_ASSERT_USER_ERROR(0, "Invalid time passed to AddWindowForceRefreshTime!");
+        return;
+    }
+
+    g.CurrentWindow->ForceRefreshTimes.push_back(time);
+}
+
+void ImGui::AddWindowForceRefreshFrame()
+{
+    ++GImGui->CurrentWindow->ForceRefreshFrames;
+}
+
+ImGuiWindowRefreshFlags ImGui::GetWindowRefreshFlags()
+{
+	return GImGui->CurrentWindow->RefreshFlags;
 }
 
 ImDrawList* ImGui::GetWindowDrawList()
@@ -10658,6 +10801,8 @@ void ImGui::UpdateInputEvents(bool trickle_fast_inputs)
     ImGuiContext& g = *GImGui;
     ImGuiIO& io = g.IO;
 
+	g.ProcessedAnyKbdInputEventCurrFrame = false;
+
     // Only trickle chars<>key when working with InputText()
     // FIXME: InputText() could parse event trail?
     // FIXME: Could specialize chars<>keys trickling rules for control keys (those not typically associated to characters)
@@ -10766,6 +10911,9 @@ void ImGui::UpdateInputEvents(bool trickle_fast_inputs)
             IM_ASSERT(0 && "Unknown event!");
         }
     }
+
+	// Populate g.ProcessedAnyInputEventCurrFrame
+	g.ProcessedAnyKbdInputEventCurrFrame = key_changed || key_changed_nonchar || text_inputted;
 
     // Record trail (for domain-specific applications wanting to access a precise trail)
     //if (event_n != 0) IMGUI_DEBUG_LOG_IO("Processed: %d / Remaining: %d\n", event_n, g.InputEventsQueue.Size - event_n);
@@ -14199,6 +14347,8 @@ static void ImGui::NavEndFrame()
     // FIXME-NAV: Wrap (not Loop) support could be handled by the scoring function and then WrapX would function without an extra frame.
     if (g.NavWindow && NavMoveRequestButNoResultYet() && (g.NavMoveFlags & ImGuiNavMoveFlags_WrapMask_) && (g.NavMoveFlags & ImGuiNavMoveFlags_Forwarded) == 0)
         NavUpdateCreateWrappingRequest();
+
+    g.LastNavWindow = NULL;
 }
 
 static void ImGui::NavUpdateCreateWrappingRequest()

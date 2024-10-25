@@ -1161,11 +1161,29 @@ struct IMGUI_API ImGuiInputTextState
 
 enum ImGuiWindowRefreshFlags_
 {
-    ImGuiWindowRefreshFlags_None                = 0,
-    ImGuiWindowRefreshFlags_TryToAvoidRefresh   = 1 << 0,   // [EXPERIMENTAL] Try to keep existing contents, USER MUST NOT HONOR BEGIN() RETURNING FALSE AND NOT APPEND.
-    ImGuiWindowRefreshFlags_RefreshOnHover      = 1 << 1,   // [EXPERIMENTAL] Always refresh on hover
-    ImGuiWindowRefreshFlags_RefreshOnFocus      = 1 << 2,   // [EXPERIMENTAL] Always refresh on focus
+    ImGuiWindowRefreshFlags_None                            = 0,
+    ImGuiWindowRefreshFlags_TryToAvoidRefresh               = 1 << 0, // [EXPERIMENTAL] Try to keep existing contents, USER MUST NOT HONOR BEGIN() RETURNING FALSE AND NOT APPEND.
+    ImGuiWindowRefreshFlags_RefreshOnHover                  = 1 << 1, // [EXPERIMENTAL] Always refresh on hover
+    ImGuiWindowRefreshFlags_RefreshOnFocus                  = 1 << 2, // [EXPERIMENTAL] Always refresh on focus
+
+    ImGuiWindowRefreshFlags_RefreshOnHoverAndMouseMove      = 1 << 3, // [EXPERIMENTAL] Refresh when window is hovered and mouse moved
+    ImGuiWindowRefreshFlags_RefreshOnHoverAndMouseDown	    = 1 << 4, // [EXPERIMENTAL] Refresh when window is hovered and any mouse button is down
+	ImGuiWindowRefreshFlags_RefreshOnHoverAndMouseClicks    = 1 << 5, // [EXPERIMENTAL] Refresh when window is hovered and any mouse button is clicked
+    ImGuiWindowRefreshFlags_RefreshOnHoverAndMouseWheel     = 1 << 6, // [EXPERIMENTAL] Refresh when window is hovered and mouse wheel is being scrolled
+
+    ImGuiWindowRefreshFlags_RefreshOnFocusAndKeyboardAction = 1 << 7, // [EXPERIMENTAL] Refresh when there is any keyboard action ke
+
+	ImGuiWindowRefreshFlags_RefreshOnActiveId			    = 1 << 8, // [EXPERIMENTAL] Refresh when any item owned by this window is activated
+    ImGuiWindowRefreshFlags_RefreshOnActivePopup            = 1 << 9, // [EXPERIMENTAL] Refresh when window owns any opened popup
     // Refresh policy/frequency, Load Balancing etc.
+
+    ImGuiWindowRefreshFlags_RefreshOnHoverAndMouseAction  = ImGuiWindowRefreshFlags_RefreshOnHoverAndMouseMove | ImGuiWindowRefreshFlags_RefreshOnHoverAndMouseDown
+                                                    | ImGuiWindowRefreshFlags_RefreshOnHoverAndMouseClicks | ImGuiWindowRefreshFlags_RefreshOnHoverAndMouseWheel,
+
+	// [Internal]
+    ImGuiWindowRefreshFlags_SkipRefresh                     = 1 << 10,// [EXPERIMENTAL] Reuse previous frame drawn contents, Begin() returns false.
+    ImGuiWindowRefreshFlags_RefreshedByTime                 = 1 << 11,// [EXPERIMENTAL] Set when window was force refresh by time (e.g. time < 0.0 || time >= ImGui::GetTime())
+    ImGuiWindowRefreshFlags_RefreshByNextFrameTime          = 1 << 12,// [EXPERIMENTAL] Set when window was refreshed by next frame time (< 0.0)
 };
 
 enum ImGuiNextWindowDataFlags_
@@ -2232,6 +2250,7 @@ struct ImGuiContext
     ImVector<ImGuiInputEvent> InputEventsTrail;                 // Past input events processed in NewFrame(). This is to allow domain-specific application to access e.g mouse/pen trail.
     ImGuiMouseSource        InputEventsNextMouseSource;
     ImU32                   InputEventsNextEventId;
+    bool                    ProcessedAnyKbdInputEventCurrFrame;
 
     // Windows state
     ImVector<ImGuiWindow*>  Windows;                            // Windows, sorted in display order, back to front
@@ -2344,6 +2363,7 @@ struct ImGuiContext
     bool                    NavIdIsAlive;                       // Nav widget has been seen this frame ~~ NavRectRel is valid
     ImGuiID                 NavId;                              // Focused item for navigation
     ImGuiWindow*            NavWindow;                          // Focused window for navigation. Could be called 'FocusedWindow'
+    ImGuiWindow*            LastNavWindow;                      // Last focused window for navigation
     ImGuiID                 NavFocusScopeId;                    // Focused focus scope (e.g. selection code often wants to "clear other items" when landing on an item of the same scope)
     ImGuiNavLayer           NavLayer;                           // Focused layer (main scrolling layer, or menu/title bar layer)
     ImGuiID                 NavActivateId;                      // ~~ (g.ActiveId == 0) && (IsKeyPressed(ImGuiKey_Space) || IsKeyDown(ImGuiKey_Enter) || IsKeyPressed(ImGuiKey_NavGamepadActivate)) ? NavId : 0, also set when calling ActivateItem()
@@ -2683,7 +2703,9 @@ struct IMGUI_API ImGuiWindow
     bool                    Collapsed;                          // Set when collapsing window to become only title-bar
     bool                    WantCollapseToggle;
     bool                    SkipItems;                          // Set when items can safely be all clipped (e.g. window not visible or collapsed)
-    bool                    SkipRefresh;                        // [EXPERIMENTAL] Reuse previous frame drawn contents, Begin() returns false.
+    ImGuiWindowRefreshFlags RefreshFlags;                       // [EXPERIMENTAL] Window refresh flags (e.g. to reuse previous frame drawn contents if ImGuiWindowRefreshFlags_SkipRefresh set, Begin() returns false.)
+	ImVector<double>		ForceRefreshTimes;				    // [EXPERIMENTAL] Force refresh window when ForceRefreshTimes[i] >= ImGui::GetTime()
+    int                     ForceRefreshFrames;                 // [EXPERIMENTAL] Force refresh window for the specified amount of frames
     bool                    Appearing;                          // Set during the frame where the window is appearing (or re-appearing)
     bool                    Hidden;                             // Do not display (== HiddenFrames*** > 0)
     bool                    IsFallbackWindow;                   // Set on the "Debug##Default" window.
@@ -3205,6 +3227,9 @@ namespace ImGui
 
     // Windows: Idle, Refresh Policies [EXPERIMENTAL]
     IMGUI_API void          SetNextWindowRefreshPolicy(ImGuiWindowRefreshFlags flags);
+	IMGUI_API void			AddWindowForceRefreshTime(double time);
+    IMGUI_API void          AddWindowForceRefreshFrame();
+    IMGUI_API ImGuiWindowRefreshFlags   GetWindowRefreshFlags();
 
     // Fonts, drawing
     IMGUI_API void          SetCurrentFont(ImFont* font);
